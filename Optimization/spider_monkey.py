@@ -81,7 +81,9 @@ def run_optimization(df, q_table, pop_size=10, iterations=30):
             new_monkeys.append(vm)
 
         monkeys = np.array(new_monkeys)
-        print(f"Iteration {iteration+1}: Best VM = {best_vm} | Penalty = {best_penalty:.2f}")
+
+        if iteration == iterations - 1:
+          print(f"Optimization Completed | Best VM = {best_vm}")
 
     #  All lists have SAME length = iterations
     result_df = pd.DataFrame({

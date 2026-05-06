@@ -10,44 +10,106 @@ import pickle
 from io import BytesIO
 from Optimization import spider_monkey
 from tensorflow.keras.models import load_model
+from aws_scaling import update_aws_scaling_capacity
 
-from aws_scaling import update_aws_scaling_capacity  # mock AWS simulator
+# ---------------------------------------------------
+# PAGE CONFIG
+# ---------------------------------------------------
+st.set_page_config(
+    page_title="Smart Cloud Resource Allocation",
+    layout="wide",
+    page_icon="☁️"
+)
 
-# -------------------------------
-# Initialize session state values
-# -------------------------------
+# ---------------------------------------------------
+# SESSION STATE
+# ---------------------------------------------------
 if "runtime_result_df" not in st.session_state:
     st.session_state["runtime_result_df"] = None
 
 if "runtime_recommended_vms" not in st.session_state:
     st.session_state["runtime_recommended_vms"] = None
 
-# App layout
-st.set_page_config(page_title="Adaptive Provisioning", layout="wide")
-
-# Base paths
+# ---------------------------------------------------
+# BASE DIRECTORY
+# ---------------------------------------------------
 base_dir = os.path.dirname(os.path.abspath(__file__))
-dataset_path = os.path.join(base_dir, "Data", "synthetic_dataset.xlsx")
 
-# Sidebar controls
-st.sidebar.header("Simulation Controls")
+# ---------------------------------------------------
+# LOAD DATASET
+# ---------------------------------------------------
+@st.cache_data
+def load_data():
+    # Rename your dataset file to this:
+    # cloud_workload_trace_2024.csv
+
+    csv_path = os.path.join(base_dir, "Data", "cloud_workload_trace_2024.csv")
+
+    if not os.path.exists(csv_path):
+        st.error("Dataset file not found in Data folder.")
+        return pd.DataFrame()
+
+    df = pd.read_csv(csv_path)
+
+    # Cleaning
+    df.columns = df.columns.str.strip()
+    df = df.drop_duplicates()
+    df = df.ffill()
+
+    required_cols = [
+        "CPU Utilization (%)",
+        "Memory Utilization (%)",
+        "Number of Active VMs"
+    ]
+
+    for col in required_cols:
+        if col not in df.columns:
+            st.error(f"Missing required column: {col}")
+            return pd.DataFrame()
+
+    df["CPU Utilization (%)"] = df["CPU Utilization (%)"].clip(0, 100)
+    df["Memory Utilization (%)"] = df["Memory Utilization (%)"].clip(0, 100)
+
+    return df
+
+
+df = load_data()
+
+if df.empty:
+    st.stop()
+
+original_df = df.copy()
+
+# ---------------------------------------------------
+# HEADER
+# ---------------------------------------------------
+st.markdown("""
+# ☁️ Smart Cloud Resource Allocation
+### Intelligent VM Allocation for Dynamic Cloud Environments
+""")
+
+# ---------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------
+st.sidebar.title("⚙️ Simulation Controls")
+
 pop_size = st.sidebar.slider("Spider Monkey Population", 5, 100, 10)
 iterations = st.sidebar.slider("Iterations", 10, 200, 30)
-rl_method = st.sidebar.radio("Select RL Technique", ("Q-learning", "DQN"))
+rl_method = st.sidebar.radio("Select RL Technique", ["Q-learning", "DQN"])
 
-# --- Stress test simulation for dataset ---
-st.sidebar.markdown("### Stress Test Simulation")
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔥 Stress Test Simulation")
+
 cpu_spike = st.sidebar.slider("CPU Spike (%)", 0, 100, 0)
 mem_boost = st.sidebar.slider("Memory Boost Multiplier", 1.0, 2.0, 1.0, step=0.1)
 
-# Load dataset
-df = pd.read_excel(dataset_path)
-
-# Apply dataset modification
+# Apply stress
 df["CPU Utilization (%)"] = np.clip(df["CPU Utilization (%)"] + cpu_spike, 0, 100)
 df["Memory Utilization (%)"] = np.clip(df["Memory Utilization (%)"] * mem_boost, 0, 100)
 
-# Load RL agent
+# ---------------------------------------------------
+# LOAD RL MODELS
+# ---------------------------------------------------
 q_learning_path = os.path.join(base_dir, "RL_Agent", "q_table.pkl")
 dqn_model_path = os.path.join(base_dir, "RL_Agent", "models", "dqn_model.h5")
 
@@ -58,211 +120,259 @@ if rl_method == "Q-learning":
     if os.path.exists(q_learning_path):
         with open(q_learning_path, "rb") as f:
             q_table = pickle.load(f)
+
 elif rl_method == "DQN":
     if os.path.exists(dqn_model_path):
-        st.success("DQN model loaded!")
         model = load_model(dqn_model_path)
+        st.sidebar.success("DQN Model Loaded")
     else:
-        st.warning("DQN model not found.")
+        st.sidebar.warning("DQN Model Not Found")
 
-# -------------------------------
-# TITLE
-# -------------------------------
-st.title("Adaptive Resource Provisioning using RL + SMO")
-st.markdown("A dynamic cloud resource optimization dashboard using **Reinforcement Learning** and **Spider Monkey Optimization**.")
-
-# -------------------------------
-# 1️ RUNTIME SCENARIO TESTER
-# -------------------------------
+# ---------------------------------------------------
+# RUNTIME TESTER
+# ---------------------------------------------------
 st.markdown("---")
-st.header(" Runtime Scenario Tester (What-if Analysis)")
+st.subheader("🧪 Runtime Scenario Tester")
 
 scenario = st.selectbox(
-    "Choose a predefined scenario",
-    ["Custom", "CPU Spike", "Memory Bottleneck", "Network Congestion", "Underutilized Cluster"],
+    "Select Workload Scenario",
+    ["Custom", "CPU Spike", "Memory Bottleneck", "Underutilized Cluster"]
 )
 
-# DEFAULT INPUT VALUES
 cpu_default = 60
 mem_default = 50
-disk_default = 100.0
-net_default = 50.0
 active_default = 10
-workload_default = "Mixed"
-demand_default = "Medium"
 
-# Scenario presets
 if scenario == "CPU Spike":
-    cpu_default, mem_default = 90, 50
-    workload_default, demand_default = "CPU-intensive", "High"
-
+    cpu_default = 90
 elif scenario == "Memory Bottleneck":
-    cpu_default, mem_default = 40, 90
-    workload_default, demand_default = "Memory-intensive", "High"
-
-elif scenario == "Network Congestion":
-    cpu_default, mem_default = 50, 60
-    net_default = 10.0
-    workload_default, demand_default = "I/O-intensive", "Medium"
-
+    mem_default = 90
 elif scenario == "Underutilized Cluster":
-    cpu_default, mem_default = 20, 25
-    active_default = 30
-    demand_default = "Low"
+    cpu_default, mem_default, active_default = 20, 25, 30
 
-# Input Sliders
-colA, colB = st.columns(2)
+col1, col2 = st.columns(2)
 
-with colA:
+with col1:
     cpu_input = st.slider("CPU Utilization (%)", 0, 100, cpu_default)
     mem_input = st.slider("Memory Utilization (%)", 0, 100, mem_default)
-    disk_io_input = st.slider("Disk I/O (MB/s)", 0.0, 200.0, disk_default)
-    net_bw_input = st.slider("Network Bandwidth (Mbps)", 0.0, 200.0, net_default)
 
-with colB:
+with col2:
     active_vms_input = st.slider("Current Active VMs", 1, 100, active_default)
 
-    workload_options = ["CPU-intensive", "Memory-intensive", "I/O-intensive", "Mixed"]
-    workload_input = st.selectbox("Workload Type", workload_options, index=workload_options.index(workload_default))
+if st.button("🚀 Run Runtime Allocation"):
 
-    demand_options = ["Low", "Medium", "High", "Very High"]
-    resource_demand_input = st.selectbox("Resource Demand Level", demand_options, index=demand_options.index(demand_default))
-
-run_runtime = st.button(" Run Runtime Allocation")
-
-# When the runtime button is clicked
-if run_runtime:
     base_row = df.iloc[-1].copy()
 
-    # Update only existing columns
-    mapping = {
-        "CPU Utilization (%)": cpu_input,
-        "Memory Utilization (%)": mem_input,
-        "Disk I/O (MB/s)": disk_io_input,
-        "Network Bandwidth (Mbps)": net_bw_input,
-        "Number of Active VMs": active_vms_input,
-        "Workload Type": workload_input,
-        "Resource Demand": resource_demand_input,
-    }
+    base_row["CPU Utilization (%)"] = cpu_input
+    base_row["Memory Utilization (%)"] = mem_input
+    base_row["Number of Active VMs"] = active_vms_input
 
-    for key,val in mapping.items():
-        if key in df.columns:
-            base_row[key] = val
+    runtime_df = pd.DataFrame([base_row] * 10)
 
-    runtime_df = pd.DataFrame([base_row])
+    runtime_result_df, _ = spider_monkey.run_optimization(runtime_df, q_table, 5, 5)
 
-    # small pop + iterations for speed
-    runtime_pop, runtime_iter = 5, 5
-    with st.spinner("Optimizing..."):
-        runtime_result_df, runtime_fitness = spider_monkey.run_optimization(
-            runtime_df, q_table, runtime_pop, runtime_iter
+    st.session_state["runtime_result_df"] = runtime_result_df
+    st.session_state["runtime_recommended_vms"] = int(
+        runtime_result_df["Optimized VM Count"].iloc[-1]
+    )
+
+# ---------------------------------------------------
+# RUNTIME RESULT
+# ---------------------------------------------------
+if st.session_state["runtime_result_df"] is not None:
+
+    st.success("Optimization Completed")
+
+    st.metric(
+        label="Recommended VM Count",
+        value=st.session_state["runtime_recommended_vms"]
+    )
+
+    if st.button("☁️ Simulate AWS Auto Scaling"):
+        update_aws_scaling_capacity(
+            st.session_state["runtime_recommended_vms"]
         )
 
-    # Save results to session state
-    st.session_state["runtime_result_df"] = runtime_result_df
-    st.session_state["runtime_recommended_vms"] = int(runtime_result_df["Optimized VM Count"].iloc[-1])
+    st.subheader("📈 Runtime VM Allocation Trend")
+    st.line_chart(
+        st.session_state["runtime_result_df"]["Optimized VM Count"]
+    )
 
-    st.success("Runtime optimization completed!")
-
-# -------------------------------
-# DISPLAY RUNTIME RESULTS
-# -------------------------------
-
-runtime_result_df = st.session_state["runtime_result_df"]
-recommended_vms = st.session_state["runtime_recommended_vms"]
-
-if runtime_result_df is not None:
-    st.metric("Recommended VMs (Runtime)", recommended_vms)
-
-    # AWS SIMULATION BUTTON (works now!)
-    if st.button(" Simulate AWS Auto Scaling"):
-        update_aws_scaling_capacity(recommended_vms)
-        st.success(f"Simulated: AWS Auto Scaling would set capacity to {recommended_vms} instances.")
-
-    # Runtime VM Trend
-    st.subheader("Runtime VM Allocation Trend")
-    st.line_chart(runtime_result_df["Optimized VM Count"])
-
-    # Cost/Energy
-    ccols = [c for c in ["Cost", "Energy"] if c in runtime_result_df.columns]
-    if ccols:
-        st.subheader("Runtime Cost & Energy")
-        st.line_chart(runtime_result_df[ccols])
-
-# ----------------------------------------------------
-# 2️ OFFLINE DATASET-BASED OPTIMIZATION
-# ----------------------------------------------------
+# ---------------------------------------------------
+# OFFLINE OPTIMIZATION
+# ---------------------------------------------------
 st.markdown("---")
-st.header(" Offline Optimization on Workload Dataset")
+st.subheader("📊 Historical Workload Optimization")
 
-with st.spinner("Running optimization..."):
-    result_df, fitness_history = spider_monkey.run_optimization(df, q_table, pop_size, iterations)
+safe_df = df
 
-# Summary metrics
-col1, col2, col3 = st.columns(3)
-col1.metric("Min Penalty", f"{min(fitness_history):.2f}")
-col2.metric("Max Penalty", f"{max(fitness_history):.2f}")
-col3.metric("Final VM Recommendation", int(result_df["Optimized VM Count"].iloc[-1]))
+result_df, fitness_history = spider_monkey.run_optimization(
+    safe_df, q_table, pop_size, iterations
+)
+# ---------------------------------------------------
+# METRICS
+# ---------------------------------------------------
+m1, m2, m3 = st.columns(3)
 
-# VM Trend
-st.subheader("Optimized VM Allocation Over Iterations")
+m1.metric("Minimum Penalty", round(min(fitness_history), 2))
+m2.metric("Maximum Penalty", round(max(fitness_history), 2))
+m3.metric(
+    "Final VM Recommendation",
+    int(result_df["Optimized VM Count"].iloc[-1])
+)
+
+# -------------------------------
+# SUMMARY CALCULATIONS
+# -------------------------------
+avg_vm = round(result_df["Optimized VM Count"].mean(), 2)
+avg_cost = round(result_df["Cost"].mean(), 2)
+avg_energy = round(result_df["Energy"].mean(), 2)
+# ---------------------------------------------------
+# 🔄 BEFORE vs AFTER COMPARISON
+# ---------------------------------------------------
+st.markdown("---")
+st.markdown("## 🔄 Before vs After Optimization")
+
+before_vm = original_df["Number of Active VMs"].mean()
+after_vm = avg_vm
+
+col1, col2 = st.columns(2)
+
+col1.metric("Before Optimization (Avg VM)", round(before_vm, 2))
+col2.metric(
+    "After Optimization (Avg VM)",
+    after_vm,
+    delta=round(after_vm - before_vm, 2)
+)
+cost_before = before_vm * 0.5
+cost_after = avg_cost
+
+reduction = ((cost_before - cost_after) / cost_before) * 100
+
+st.metric("💰 Cost Reduction (%)", round(reduction, 2))
+violations = original_df[original_df["CPU Utilization (%)"] > 80]
+st.metric("⚠️ SLA Violations", len(violations))
+
+# ---------------------------------------------------
+# GRAPHS
+# ---------------------------------------------------
+st.subheader("📌 Optimized VM Allocation Over Iterations")
 st.line_chart(result_df["Optimized VM Count"])
 
-# ----------------------------------------------------
-# Q-TABLE VISUALIZATION
-# ----------------------------------------------------
-st.subheader("Q-Table Heatmap")
-
-view_option = st.radio("Select View Mode", ["Single Q-Table", "Compare Two Q-Tables"], horizontal=True)
-
-def generate_heatmap_matrix(q_table):
-    if not q_table:
-        return np.zeros((1,1)), []
-    states = list(q_table.keys())
-    action_labels = list(list(q_table.values())[0].keys())
-    matrix = np.array([list(q_table[s].values()) for s in states])
-    return matrix, action_labels
-
-if rl_method == "Q-learning":
-    matrix, action_labels = generate_heatmap_matrix(q_table)
-    fig, ax = plt.subplots(figsize=(8,4))
-    sns.heatmap(matrix, ax=ax, cmap="YlOrRd")
-    st.pyplot(fig)
-else:
-    st.info("DQN does not use a Q-table.")
-
-# ----------------------------------------------------
-# COST & ENERGY
-# ----------------------------------------------------
-st.subheader("Cost Over Iterations")
+st.subheader("💰 Operational Cost Over Iterations")
 st.line_chart(result_df["Cost"])
 
-st.subheader("Energy Consumption Over Iterations")
+st.subheader("⚡ Energy Consumption Over Iterations")
 st.line_chart(result_df["Energy"])
 
-# SLA
-st.subheader("SLA Violation Check (CPU > 75%)")
-fig, ax = plt.subplots(figsize=(8,3))
-ax.plot(df["CPU Utilization (%)"], color="orange")
-ax.axhline(75, color="red", linestyle="--")
-st.pyplot(fig)
+# ---------------------------------------------------
+# Q TABLE
+# ---------------------------------------------------
+if rl_method == "Q-learning" and q_table:
 
-# Raw Data
-st.subheader("Raw Dataset Preview")
-st.dataframe(df.head())
+    st.subheader("🧠 Q-Learning Decision Heatmap")
 
-# Summary Table
-st.subheader("Summary Statistics")
-summary = pd.DataFrame({
-    "Average VM Count": [round(result_df["Optimized VM Count"].mean(), 2)],
-    "Average Cost": [round(result_df["Cost"].mean(), 2)],
-    "Average Energy": [round(result_df["Energy"].mean(), 2)],
-})
-st.table(summary)
+    matrix = np.array([list(v.values()) for v in q_table.values()])
 
-# Export
-st.markdown("### Export Optimized Results")
+    fig, ax = plt.subplots(figsize=(10, 4))
+    sns.heatmap(matrix, cmap="YlOrRd", ax=ax)
+    ax.set_xlabel("Actions")
+    ax.set_ylabel("States")
+    st.pyplot(fig)
+st.markdown("---")
+
+
+st.markdown("## 🎮 AI-based Cloud Simulator")
+
+sim_cpu = st.slider("Simulated CPU (%)", 0, 100, 70)
+sim_mem = st.slider("Simulated Memory (%)", 0, 100, 60)
+sim_vm = st.slider("Current VMs", 1, 50, 10)
+
+sim_df = pd.DataFrame([{
+    "CPU Utilization (%)": sim_cpu,
+    "Memory Utilization (%)": sim_mem,
+    "Number of Active VMs": sim_vm
+}] * 5)
+
+# Button-based simulation (BEST PRACTICE)
+if st.button("🚀 Run AI Simulation"):
+    sim_result, _ = spider_monkey.run_optimization(sim_df, q_table, 5, 5)
+
+    rec = int(sim_result["Optimized VM Count"].iloc[-1])
+
+    st.success(f"🤖 AI Recommended VMs: {rec}")
+
+# ---------------------------------------------------
+# 📊 FINAL PERFORMANCE SUMMARY (Attractive Ending)
+# ---------------------------------------------------
+st.markdown("---")
+st.markdown("## 🚀 Final System Insights")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric("⚙️ Avg VM Allocation", avg_vm, delta="Optimized")
+col2.metric("💰 Avg Cost ($)", avg_cost)
+col3.metric("⚡ Avg Energy", avg_energy)
+
+st.info("These metrics represent overall system efficiency after optimization.")
+
+# ---------------------------------------------------
+# 📉 PERFORMANCE INTERPRETATION (SMART ADDITION)
+# ---------------------------------------------------
+st.markdown("### 📈 Performance Insight")
+
+if avg_vm < 10:
+    st.success("✅ System is efficiently utilizing fewer VMs → Cost optimized")
+elif avg_vm < 15:
+    st.warning("⚖️ Balanced resource allocation detected")
+else:
+    st.error("⚠️ High VM usage → Possible over-provisioning")
+
+
+# ---------------------------------------------------
+# ⬇️ EXPORT FILES (IMPROVED UI)
+# ---------------------------------------------------
+st.markdown("---")
+st.markdown("## ⬇️ Export Results")
+
+colA, colB = st.columns(2)
+
+# Dataset download
 buf = BytesIO()
-result_df.to_excel(buf, index=False)
+original_df.to_csv(buf, index=False)
 buf.seek(0)
-st.download_button("Download Results", buf, "optimized_vm_allocation.xlsx")
+
+colA.download_button(
+    label="📥 Download Full Workload Dataset",
+    data=buf,
+    file_name="cloud_workload_trace_2024.csv",
+    mime="text/csv"
+)
+
+# Results download
+buf2 = BytesIO()
+result_df.to_csv(buf2, index=False)
+buf2.seek(0)
+
+colB.download_button(
+    label="📊 Download Optimization Results",
+    data=buf2,
+    file_name="optimized_resource_allocation.csv",
+    mime="text/csv"
+)
+# ---------------------------------------------------
+# DATA PREVIEW
+# ---------------------------------------------------
+st.markdown("---")
+st.subheader("📁 Dataset Preview")
+
+st.dataframe(original_df.head(50), width="stretch")
+# ---------------------------------------------------
+# 🎉 FINAL FOOTER (PRO LOOK)
+# ---------------------------------------------------
+st.markdown("---")
+st.markdown(
+    "<center><h4>Smart Cloud Resource Allocation</h4>"
+    "<p>Developed using RL + Spider Monkey Optimization</p></center>",
+    unsafe_allow_html=True
+)
